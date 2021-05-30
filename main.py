@@ -12,6 +12,8 @@ WINDOW_TITLE = 'Adam Adrian Claudiu - GO!'
 BACKGROUND_COLOR = arcade.color.DARK_SLATE_BLUE
 BLACK_STONE_PATH = 'assets/black.png'
 WHITE_STONE_PATH = 'assets/white.png'
+DIRECTIONS_X = (0, 1, 0, -1)
+DIRECTIONS_Y = (-1, 0, 1, 0)
 
 
 # DIRECTORY :: UTIL
@@ -51,8 +53,9 @@ class GameType(Enum):
 
 
 class StoneType(Enum):
-    BLACK = 0
-    WHITE = 1
+    EMPTY = 0
+    BLACK = 1
+    WHITE = 2
 
 
 # DIRECTORY :: COMPONENTS
@@ -99,10 +102,30 @@ class MyGhostFlatButton(arcade.gui.UIGhostFlatButton):
             window.show_view(SettingsView(GameType.AVA))
         if text == 'EXIT':
             arcade.close_window()
-        if text == 'BACK':
+        if text == 'BACK' or text == 'GO BACK':
             window.show_view(MenuView())
-        if text == 'PLAY':
+        if text == 'PLAY' or text == 'PLAY AGAIN':
             window.show_view(GameView(self.selected_options))
+
+
+class PlayerButton(arcade.gui.UIGhostFlatButton):
+    def __init__(self, center_x, center_y, text, player, game):
+        super().__init__(
+            text=text,
+            center_x=center_x,
+            center_y=center_y,
+        )
+
+        self.player = player
+        self.game = game
+
+    def on_click(self):
+        text = self.text.strip()
+        if text == 'RESIGN':
+            self.player.resign()
+
+        if text == "PASS":
+            self.game.next_turn()
 
 
 class MySelectableButton(arcade.gui.UIGhostFlatButton):
@@ -194,6 +217,7 @@ class Player:
         self.score = score
         self.time = time
         self.column_x = column_x
+        self.has_resigned = False
 
     def draw(self, name_y, score_y, time_y, name_color):
         self.draw_name(name_y, name_color)
@@ -236,11 +260,22 @@ class Player:
             align='center',
         )
 
+    def resign(self):
+        self.has_resigned = True
+
 
 class StoneSprite(arcade.sprite.Sprite):
-    def __init__(self, size, center_x, center_y, type=None):
+    def __init__(
+            self,
+            size,
+            center_x,
+            center_y,
+            table_position,  # (0, 0) is  left bottom corner in matrix
+            type=StoneType.EMPTY):
         scale = size / 900
         self.type = type
+        self.table_position = table_position
+        self.cluster_id = None
 
         super().__init__(
             filename=get_path('assets/white.png'),
@@ -258,6 +293,29 @@ class StoneSprite(arcade.sprite.Sprite):
         self.alpha = 255
 
 
+class StoneCluster:
+    uuid = 0
+    active_clusters = 0
+
+    def __init__(self, type: StoneType):
+        self.type = type
+        self.stones = []
+        StoneCluster.uuid += 1
+        StoneCluster.active_clusters += 1
+        self.liberties = 0
+
+    def add(self, stone):
+        self.stones.append(stone)
+
+    def addAll(self, stones):
+        self.stones += stones
+
+    def __del__(self):
+        StoneCluster.active_clusters -= 1
+        if StoneCluster.active_clusters == 0:
+            StoneCluster.uuid = 0
+
+
 class Table:
     def __init__(self, start_x, start_y, width, height,
                  dimension: TableDimension):
@@ -273,14 +331,12 @@ class Table:
         if dimension == TableDimension.DIM10x10:
             self.nr_rows = 10
 
-        self.matrix = [[0 for _ in range(self.nr_rows + 1)]
-                       for _ in range(self.nr_rows + 1)]
-
         self.square_size = self.height // self.nr_rows
         self.stone_size = self.square_size // 2
 
         self.stone_sprites = arcade.SpriteList()
         self.stone_matrix = []  # list of StoneSprite
+        self.clusters = {}
 
     def setup(self):
         for i in range(self.nr_rows + 1):
@@ -288,7 +344,10 @@ class Table:
             for j in range(self.nr_rows + 1):
                 center_x = self.start_x + j * self.square_size
                 center_y = self.start_y + i * self.square_size
-                stone = StoneSprite(self.stone_size, center_x, center_y)
+                stone = StoneSprite(self.stone_size,
+                                    center_x,
+                                    center_y,
+                                    table_position=(i, j))
                 self.stone_sprites.append(stone)
                 self.stone_matrix[i].append(stone)
 
@@ -329,6 +388,46 @@ class Table:
         i = i // 2
         j = j // 2
         return self.stone_matrix[i][j]
+
+    # return True if valid movement
+    def update_move(self, game, selected_stone: StoneSprite) -> bool:
+        if not self.try_capture(
+                game, selected_stone) and self.is_suicide(selected_stone):
+            return False
+
+        selected_stone.type = game.turn
+        return True
+
+    # return True if captured opponent stones
+    def try_capture(self, game, selected_stone: StoneSprite) -> bool:
+        xc, yc = selected_stone.table_position
+        stone_liberties = self.get_stone_liberties(xc, yc)
+        print(stone_liberties)
+        # TODO add capture logic
+        # see StoneCluster
+        # self.clusters
+        # stone.cluster_id
+        # decide when to merge clusters
+        return True
+
+    # return True if is suicide move
+    def is_suicide(self, selected_stone: StoneSprite) -> bool:
+        # TODO add suicide validation
+        return False
+
+    def is_valid_position(self, x, y):
+        return x >= 0 and x <= self.nr_rows and y >= 0 and y <= self.nr_rows
+
+    def get_stone_liberties(self, xc, yc):
+        stone_liberties = 4
+        for i in range(len(DIRECTIONS_X)):
+            x = xc + DIRECTIONS_X[i]
+            y = yc + DIRECTIONS_Y[i]
+            if not self.is_valid_position(x, y):
+                stone_liberties -= 1
+            elif self.stone_matrix[x][y].type != StoneType.EMPTY:
+                stone_liberties -= 1
+        return stone_liberties
 
 
 # DIRECTORY :: VIEWS
@@ -592,27 +691,97 @@ class GameView(arcade.View):
         )
         self.player1 = Player()
         self.player2 = Player()
-        self.cursor = StoneSprite(5, 0, 0)
+        self.cursor = StoneSprite(5, 0, 0, (-1, -1))
 
-        self.turn = StoneType.BLACK
+        self.turn = StoneType.BLACK  # decide player turn
+        self.running = True  # if game is running
 
         self.player1.column_x = self.table.start_x // 2
         self.player2.column_x = (3 * self.player1.column_x) + self.table.width
         self.player_name_y = 50
         self.player_time_y = 100
         self.player_score_y = 150
+        self.player_pass_y = 400
+        self.player_resign_y = 500
+
+        p1_buttons = []
+        p2_buttons = []
 
         if self.selected_options.game_type == GameType.PVP:
             self.player1.name = "Player1"
             self.player2.name = "Player2"
+            p1_buttons += [
+                PlayerButton(
+                    self.player1.column_x,
+                    self.player_resign_y,
+                    " RESIGN ",
+                    self.player1,
+                    self,
+                ),
+                PlayerButton(
+                    self.player1.column_x,
+                    self.player_pass_y,
+                    " PASS ",
+                    self.player1,
+                    self,
+                ),
+            ]
+
+            p2_buttons += [
+                PlayerButton(
+                    self.player2.column_x,
+                    self.window.height - self.player_resign_y,
+                    " RESIGN ",
+                    self.player2,
+                    self,
+                ),
+                PlayerButton(
+                    self.player2.column_x,
+                    self.window.height - self.player_pass_y,
+                    " PASS ",
+                    self.player2,
+                    self,
+                ),
+            ]
 
         if self.selected_options.game_type == GameType.PVA:
             self.player1.name = "YOU"
             self.player2.name = "AI"
+            p1_buttons += [
+                PlayerButton(
+                    self.player1.column_x,
+                    self.player_resign_y,
+                    " RESIGN ",
+                    self.player1,
+                    self,
+                ),
+                PlayerButton(
+                    self.player1.column_x,
+                    self.player_pass_y,
+                    " PASS ",
+                    self.player1,
+                    self,
+                ),
+            ]
 
         if self.selected_options.game_type == GameType.AVA:
             self.player1.name = "AI1"
             self.player2.name = "AI2"
+
+        self.player_buttons = {
+            StoneType.BLACK: p1_buttons,
+            StoneType.WHITE: p2_buttons
+        }
+
+        self.end_buttons = {
+            'play_again':
+            MyGhostFlatButton(text=" PLAY AGAIN ",
+                              center_x=320,
+                              center_y=270,
+                              selected_options=self.selected_options),
+            'go_back':
+            MyGhostFlatButton(text=" GO BACK ", center_x=500, center_y=270),
+        }
 
     def on_show_view(self):
         self.setup()
@@ -622,17 +791,23 @@ class GameView(arcade.View):
         self.ui_manager.unregister_handlers()
 
     def on_mouse_motion(self, x, y, dx, dy):
+        if not self.running:
+            return
+
         self.cursor.center_x = x
         self.cursor.center_y = y
 
     def on_mouse_press(self, x: float, y: float, button: int, modifiers: int):
+        if not self.running:
+            return
+
         if self.table.is_valid_point(x, y):
             selected_stone = self.table.get_stone(x, y)
-            if selected_stone == None or selected_stone.type != None:
+            if selected_stone == None or selected_stone.type != StoneType.EMPTY:
                 return
 
-            selected_stone.type = self.turn
-            self.next_turn()
+            if self.table.update_move(self, selected_stone):
+                self.next_turn()
 
     def on_update(self, delta_time):
         self.table.stone_sprites.update()
@@ -641,7 +816,7 @@ class GameView(arcade.View):
 
         for stone_row in self.table.stone_matrix:
             for stone in stone_row:
-                if stone.type == None:
+                if stone.type == StoneType.EMPTY:
                     stone.alpha = 0
                     stone.texture = Textures.get_turn_texture(self.turn)
                     if stone in stones_hit:
@@ -674,12 +849,52 @@ class GameView(arcade.View):
         self.table.draw()
         self.table.stone_sprites.draw()
 
+        if self.player1.has_resigned or self.player2.has_resigned:
+            if self.running:
+                self.clear_buttons()
+                self.ui_manager.add_ui_element(self.end_buttons['play_again'])
+                self.ui_manager.add_ui_element(self.end_buttons['go_back'])
+            self.running = False
+            self.draw_resign()
+
     def setup(self):
         self.ui_manager.purge_ui_elements()
         self.table.setup()
+        self.show_buttons()
 
     def next_turn(self):
+        self.clear_buttons()
         self.turn = StoneType.WHITE if self.turn == StoneType.BLACK else StoneType.BLACK
+        self.show_buttons()
+
+    def show_buttons(self):
+        for button in self.player_buttons[self.turn]:
+            self.ui_manager.add_ui_element(button)
+
+    def clear_buttons(self):
+        for button in self.player_buttons[self.turn]:
+            button.kill()
+
+    def draw_resign(self):
+        winner = self.player2 if self.player1.has_resigned else self.player1
+        arcade.draw_rectangle_filled(
+            center_x=400,
+            center_y=300,
+            width=400,
+            height=200,
+            color=arcade.color.BLACK_LEATHER_JACKET,
+        )
+
+        arcade.draw_text(
+            text=f"{winner.name} is the WINNER! :) ",
+            start_x=400,
+            start_y=350,
+            color=arcade.color.WHITE,
+            font_size=18,
+            align='center',
+            anchor_x='center',
+            anchor_y='center',
+        )
 
 
 # MAIN
