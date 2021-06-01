@@ -1,3 +1,4 @@
+from logging import currentframe
 from typing import Set, Text
 import arcade
 import arcade.gui
@@ -6,6 +7,9 @@ from arcade.gui import ui_style, UIToggle
 from arcade.gui.manager import UIManager
 from enum import Enum
 import os
+import copy
+
+from pyglet.window.key import B
 
 # DIRECTORY :: CONSTANTS
 WINDOW_TITLE = 'Adam Adrian Claudiu - GO!'
@@ -22,10 +26,35 @@ def get_path(rel_path):
     return os.path.join(script_dir, rel_path)
 
 
+class Timer:
+    def __init__(self):
+        self.time = 0
+        self.minutes = 0
+        self.seconds = 0
+
+    def increment(self, delta_time):
+        self.time += delta_time
+        self.minutes = int(self.time // 60)
+        self.seconds = int((self.time // 1) % 60)
+
+    def __str__(self):
+        repr = f"0{self.minutes}" if self.minutes < 10 else str(self.minutes)
+        repr += ':'
+        repr += f"0{self.seconds}" if self.seconds < 10 else str(self.seconds)
+        return repr
+
+
 # DIRECTORY :: ENUMS
 class Algorithm(Enum):
     MIN_MAX = 0
     ALPHA_BETA = 1
+
+
+class Border(Enum):
+    LEFT = 0
+    TOP = 1
+    RIGHT = 2
+    BOTTOM = 4
 
 
 class Difficulty(Enum):
@@ -105,6 +134,7 @@ class MyGhostFlatButton(arcade.gui.UIGhostFlatButton):
         if text == 'BACK' or text == 'GO BACK':
             window.show_view(MenuView())
         if text == 'PLAY' or text == 'PLAY AGAIN':
+            StoneCluster.uuid = 0
             window.show_view(GameView(self.selected_options))
 
 
@@ -122,10 +152,16 @@ class PlayerButton(arcade.gui.UIGhostFlatButton):
     def on_click(self):
         text = self.text.strip()
         if text == 'RESIGN':
+            self.game.should_end = True
             self.player.resign()
 
         if text == "PASS":
-            self.game.next_turn()
+            self.game.table.illegal_stone = None
+            self.game.moves_played += 1
+            if self.game.moves_played == self.game.available_moves:
+                self.game.should_end = True
+            else:
+                self.game.next_turn()
 
 
 class MySelectableButton(arcade.gui.UIGhostFlatButton):
@@ -212,12 +248,13 @@ class Textures:
 
 
 class Player:
-    def __init__(self, name="", score=0, time=0, column_x=0):
-        self.name = name
-        self.score = score
-        self.time = time
-        self.column_x = column_x
+    def __init__(self, stone_type):
+        self.name = ""
+        self.score = 0
+        self.time = Timer()
+        self.column_x = 0
         self.has_resigned = False
+        self.stone_type = stone_type
 
     def draw(self, name_y, score_y, time_y, name_color):
         self.draw_name(name_y, name_color)
@@ -295,25 +332,38 @@ class StoneSprite(arcade.sprite.Sprite):
 
 class StoneCluster:
     uuid = 0
-    active_clusters = 0
 
-    def __init__(self, type: StoneType):
-        self.type = type
-        self.stones = []
+    def __init__(self, stone: StoneSprite, liberties: int):
+        self.id = StoneCluster.uuid
+        self.type = stone.type
+        self.stones = set([stone])
+        self.liberties = liberties
         StoneCluster.uuid += 1
-        StoneCluster.active_clusters += 1
-        self.liberties = 0
 
-    def add(self, stone):
-        self.stones.append(stone)
+    def merge(self, cluster):
+        for stone in cluster.stones:
+            stone.cluster_id = self.id
+        self.stones.update(cluster.stones)
 
-    def addAll(self, stones):
-        self.stones += stones
+    def capture(self, game):
+        if game.turn == game.player1.stone_type:
+            game.player1.score += len(self.stones)
+        else:
+            game.player2.score += len(self.stones)
 
-    def __del__(self):
-        StoneCluster.active_clusters -= 1
-        if StoneCluster.active_clusters == 0:
-            StoneCluster.uuid = 0
+        for stone in self.stones:
+            stone.type = StoneType.EMPTY
+            stone.cluster_id = None
+
+
+class Territory:
+    def __init__(self):
+        self.visited = set()
+        self.colors = set()
+        self.borders = set()  # distinct borders (vertex aren't included)
+
+    def is_valid(self):
+        return not (len(self.colors) > 1 or len(self.borders) > 1)
 
 
 class Table:
@@ -337,6 +387,7 @@ class Table:
         self.stone_sprites = arcade.SpriteList()
         self.stone_matrix = []  # list of StoneSprite
         self.clusters = {}
+        self.illegal_stone = None  # prevent conflicts
 
     def setup(self):
         for i in range(self.nr_rows + 1):
@@ -389,31 +440,190 @@ class Table:
         j = j // 2
         return self.stone_matrix[i][j]
 
+    # DEBUG PRINT
+    def afi_cluster(self):
+        for k, v in self.clusters.items():
+            print('liberties', k, v.liberties)
+            print('stone_ids')
+            for stone in v.stones:
+                print(stone.cluster_id)
+
+    def update_cluster_liberties(self):
+        for cluster in self.clusters.values():
+            cluster.liberties = 0
+            for stone in cluster.stones:
+                xc, yc = stone.table_position
+                cluster.liberties += self.get_stone_liberties(xc, yc)
+
+    def update_local_clusters_liberties(self, selected_stone: StoneSprite):
+        xc, yc = selected_stone.table_position
+        for i in range(len(DIRECTIONS_X)):
+            x = xc + DIRECTIONS_X[i]
+            y = yc + DIRECTIONS_Y[i]
+            if self.is_valid_position(
+                    x, y) and self.stone_matrix[x][y].type != StoneType.EMPTY:
+                neighbor_stone = self.stone_matrix[x][y]
+                print('cls_id', neighbor_stone.cluster_id)
+                neighbor_cluster = self.clusters[neighbor_stone.cluster_id]
+                neighbor_cluster.liberties -= 1
+
+    def is_vertex(self, i, j):
+        return (i, j) in [(0, 0), (0, self.nr_rows), (self.nr_rows, 0),
+                          (self.nr_rows, self.nr_rows)]
+
+    def get_visited_borders(self, i, j) -> set():
+        if self.is_vertex(i, j):
+            return set()
+
+        visited_borders = set()
+        for k in range(len(DIRECTIONS_X)):
+            x = i + DIRECTIONS_X[k]
+            y = j + DIRECTIONS_Y[k]
+            if not self.is_valid_position(x, y):
+                border = None
+                if x < 0:
+                    border = Border.BOTTOM
+                if x > self.nr_rows:
+                    border = Border.TOP
+                if y < 0:
+                    border = Border.LEFT
+                if y > self.nr_rows:
+                    border = Border.RIGHT
+                visited_borders.add(border)
+        return visited_borders
+
+    def try_visit_area(self, i, j, matrix, territory: Territory):
+        territory.visited.add((i, j))
+        territory.borders.update(self.get_visited_borders(i, j))
+
+        for k in range(len(DIRECTIONS_X)):
+            x = i + DIRECTIONS_X[k]
+            y = j + DIRECTIONS_Y[k]
+            if self.is_valid_position(x, y):
+                if matrix[x][y] == StoneType.EMPTY:
+                    if (x, y) in territory.visited:
+                        continue
+                    self.try_visit_area(x, y, matrix, territory)
+
+                matrix[i][j] = matrix[x][y]
+                territory.colors.add(matrix[x][y])
+
+    def print_scoring_matrix(self, matrix):
+        for i in range(self.nr_rows, -1, -1):
+            print([tp.value for tp in matrix[i]])
+
+    def calculate_scores(self, game):
+        white_player = game.player1 if game.player1.stone_type == StoneType.WHITE else game.player2
+        black_player = game.player2 if white_player == game.player1 else game.player1
+
+        player_by_stone_type = {
+            StoneType.WHITE: white_player,
+            StoneType.BLACK: black_player
+        }
+
+        matrix_types = [[stone.type for stone in row]
+                        for row in self.stone_matrix]
+
+        print("INITIAL SCORE TABLE")
+        self.print_scoring_matrix(matrix_types)
+        print()
+
+        visited_positions = set()
+        for i in range(self.nr_rows + 1):
+            for j in range(self.nr_rows + 1):
+                if matrix_types[i][j] == StoneType.EMPTY and (
+                        i, j) not in visited_positions:
+                    initial_matrix_types = copy.deepcopy(matrix_types)
+
+                    territory = Territory()
+                    self.try_visit_area(i, j, matrix_types, territory)
+                    if not territory.is_valid():
+                        matrix_types = initial_matrix_types
+
+        print("FINAL SCORE TABLE")
+        self.print_scoring_matrix(matrix_types)
+        print()
+
+        for i in range(self.nr_rows + 1):
+            for j in range(self.nr_rows + 1):
+                if matrix_types[i][j] != StoneType.EMPTY:
+                    player_by_stone_type[matrix_types[i][j]].score += 1
+
     # return True if valid movement
     def update_move(self, game, selected_stone: StoneSprite) -> bool:
+        if selected_stone == self.illegal_stone:
+            return False
+        initial_illegal_stone = self.illegal_stone
+        self.illegal_stone = None
+        initial_clusters = self.clusters.copy()
+        selected_stone.type = game.turn
+
+        xc, yc = selected_stone.table_position
+        stone_liberties = self.get_stone_liberties(xc, yc)
+        self.clusters[StoneCluster.uuid - 1] = StoneCluster(
+            selected_stone, stone_liberties)
+        selected_stone.cluster_id = StoneCluster.uuid - 1
+
+        for i in range(len(DIRECTIONS_X)):
+            x = xc + DIRECTIONS_X[i]
+            y = yc + DIRECTIONS_Y[i]
+            if self.is_valid_position(
+                    x, y) and self.stone_matrix[x][y].type == game.turn:
+
+                neighbor_stone = self.stone_matrix[x][y]
+                neighbor_cluster = self.clusters[neighbor_stone.cluster_id]
+
+                if neighbor_stone.cluster_id == selected_stone.cluster_id:
+                    continue
+
+                current_cluster = self.clusters[selected_stone.cluster_id]
+                self.clusters.pop(current_cluster.id)
+                neighbor_cluster.merge(current_cluster)
+
+        self.update_cluster_liberties()
+
         if not self.try_capture(
                 game, selected_stone) and self.is_suicide(selected_stone):
+            self.clusters.pop(selected_stone.cluster_id)
+            selected_stone.type = StoneType.EMPTY
+            selected_stone.cluster_id = None
+            StoneCluster.uuid -= 1
+            self.clusters = initial_clusters
+            self.illegal_stone = initial_illegal_stone
             return False
 
-        selected_stone.type = game.turn
+        self.update_cluster_liberties()
+        # self.afi_cluster()
+        # for row in self.stone_matrix:
+        #     print([stone.cluster_id for stone in row])
         return True
 
     # return True if captured opponent stones
     def try_capture(self, game, selected_stone: StoneSprite) -> bool:
         xc, yc = selected_stone.table_position
-        stone_liberties = self.get_stone_liberties(xc, yc)
-        print(stone_liberties)
-        # TODO add capture logic
-        # see StoneCluster
-        # self.clusters
-        # stone.cluster_id
-        # decide when to merge clusters
-        return True
+        has_captured = False
+        opponent_type = game.get_opponent_player().stone_type
+
+        for i in range(len(DIRECTIONS_X)):
+            x = xc + DIRECTIONS_X[i]
+            y = yc + DIRECTIONS_Y[i]
+            if self.is_valid_position(
+                    x, y) and self.stone_matrix[x][y].type == opponent_type:
+                neighbor_stone = self.stone_matrix[x][y]
+                neighbor_cluster = self.clusters[neighbor_stone.cluster_id]
+                if neighbor_cluster.liberties == 0:
+                    if len(neighbor_cluster.stones) == 1:
+                        self.illegal_stone = next(iter(
+                            neighbor_cluster.stones))
+                    self.clusters.pop(neighbor_cluster.id)
+                    neighbor_cluster.capture(game)
+                    has_captured = True
+
+        return has_captured
 
     # return True if is suicide move
     def is_suicide(self, selected_stone: StoneSprite) -> bool:
-        # TODO add suicide validation
-        return False
+        return self.clusters[selected_stone.cluster_id].liberties == 0
 
     def is_valid_position(self, x, y):
         return x >= 0 and x <= self.nr_rows and y >= 0 and y <= self.nr_rows
@@ -681,6 +891,10 @@ class GameView(arcade.View):
         self.ui_manager = UIManager()
 
         self.selected_options = selected_options
+        self.moves_played = 0
+        self.available_moves = int(self.selected_options.moves.name[3:])
+        self.winner = None
+        self.game_started = False  # True when black make first move
 
         self.table = Table(
             start_x=int((self.window.width - 500) / 2),
@@ -689,12 +903,13 @@ class GameView(arcade.View):
             height=500,
             dimension=selected_options.tabledimension,
         )
-        self.player1 = Player()
-        self.player2 = Player()
+        self.player1 = Player(StoneType.BLACK)
+        self.player2 = Player(StoneType.WHITE)
         self.cursor = StoneSprite(5, 0, 0, (-1, -1))
 
         self.turn = StoneType.BLACK  # decide player turn
         self.running = True  # if game is running
+        self.should_end = False
 
         self.player1.column_x = self.table.start_x // 2
         self.player2.column_x = (3 * self.player1.column_x) + self.table.width
@@ -807,9 +1022,32 @@ class GameView(arcade.View):
                 return
 
             if self.table.update_move(self, selected_stone):
-                self.next_turn()
+                self.game_started = True
+                self.moves_played += 1
+                if self.moves_played == self.available_moves:
+                    self.should_end = True
+                else:
+                    self.next_turn()
+
+    def get_winner(self):
+        if self.player1.has_resigned or self.player2.has_resigned:
+            return self.player2 if self.player1.has_resigned else self.player1
+
+        self.table.calculate_scores(self)
+        if self.player1.score == self.player2.score:
+            return None
+
+        return self.player1 if self.player1.score > self.player2.score else self.player2
+
+    def get_current_player(self) -> Player:
+        return self.player1 if self.turn == self.player1.stone_type else self.player2
+
+    def get_opponent_player(self) -> Player:
+        return self.player2 if self.turn == self.player1.stone_type else self.player1
 
     def on_update(self, delta_time):
+        if self.running and self.game_started:
+            self.get_current_player().time.increment(delta_time)
         self.table.stone_sprites.update()
         stones_hit = arcade.check_for_collision_with_list(
             self.cursor, self.table.stone_sprites)
@@ -824,8 +1062,22 @@ class GameView(arcade.View):
                 else:
                     stone.alpha = 255
 
+    def draw_moves(self):
+        arcade.draw_text(
+            text=f"MOVES AVAILALBE: {self.available_moves - self.moves_played}",
+            start_x=self.window.width / 2,
+            start_y=self.window.height - 30,
+            color=arcade.color.WHITE,
+            font_size=20,
+            anchor_x='center',
+            anchor_y='center',
+            align='center',
+        )
+
     def on_draw(self):
         arcade.start_render()
+
+        self.draw_moves()
 
         self.player1.draw(
             self.player_name_y,
@@ -849,13 +1101,19 @@ class GameView(arcade.View):
         self.table.draw()
         self.table.stone_sprites.draw()
 
-        if self.player1.has_resigned or self.player2.has_resigned:
-            if self.running:
-                self.clear_buttons()
-                self.ui_manager.add_ui_element(self.end_buttons['play_again'])
-                self.ui_manager.add_ui_element(self.end_buttons['go_back'])
+        self.end_game()
+
+    def end_game(self):
+        if self.should_end:
             self.running = False
-            self.draw_resign()
+            self.clear_buttons()
+            self.ui_manager.add_ui_element(self.end_buttons['play_again'])
+            self.ui_manager.add_ui_element(self.end_buttons['go_back'])
+            self.winner = self.get_winner()
+
+        self.should_end = False
+        if self.running == False:
+            self.draw_end_game(self.winner)
 
     def setup(self):
         self.ui_manager.purge_ui_elements()
@@ -875,8 +1133,9 @@ class GameView(arcade.View):
         for button in self.player_buttons[self.turn]:
             button.kill()
 
-    def draw_resign(self):
-        winner = self.player2 if self.player1.has_resigned else self.player1
+    def draw_end_game(self, winner):
+        text = f"{winner.name} is the WINNER! :) " if winner != None else " Is draw. "
+
         arcade.draw_rectangle_filled(
             center_x=400,
             center_y=300,
@@ -886,7 +1145,7 @@ class GameView(arcade.View):
         )
 
         arcade.draw_text(
-            text=f"{winner.name} is the WINNER! :) ",
+            text=text,
             start_x=400,
             start_y=350,
             color=arcade.color.WHITE,
