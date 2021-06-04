@@ -1,4 +1,3 @@
-from logging import currentframe
 from typing import Set, Text
 import arcade
 import arcade.gui
@@ -9,7 +8,7 @@ from enum import Enum
 import os
 import copy
 
-from pyglet.window.key import B
+from pyglet.window.key import B, S
 
 # DIRECTORY :: CONSTANTS
 WINDOW_TITLE = 'Adam Adrian Claudiu - GO!'
@@ -24,6 +23,20 @@ DIRECTIONS_Y = (-1, 0, 1, 0)
 def get_path(rel_path):
     script_dir = os.path.dirname(__file__)  # <-- absolute dir the script is in
     return os.path.join(script_dir, rel_path)
+
+
+class Debugger:
+    def print_cluster_stone_matrix(stone_matrix):
+        for i in range(len(stone_matrix) - 1, -1, -1):
+            print([stone.cluster_id for stone in stone_matrix[i]])
+
+    def print_matrix(matrix, n):
+        for i in range(n, -1, -1):
+            print([el for el in matrix[i]])
+
+    def print_clusters(clusters):
+        for cluster in clusters.values():
+            print(cluster.id, cluster.liberties)
 
 
 class Timer:
@@ -333,7 +346,7 @@ class StoneSprite(arcade.sprite.Sprite):
 class StoneCluster:
     uuid = 0
 
-    def __init__(self, stone: StoneSprite, liberties: int):
+    def __init__(self, stone: StoneSprite, liberties: set):
         self.id = StoneCluster.uuid
         self.type = stone.type
         self.stones = set([stone])
@@ -345,15 +358,33 @@ class StoneCluster:
             stone.cluster_id = self.id
         self.stones.update(cluster.stones)
 
-    def capture(self, game):
+    def update_capture_score(self, game):
         if game.turn == game.player1.stone_type:
             game.player1.score += len(self.stones)
         else:
             game.player2.score += len(self.stones)
 
+    def clear_captured_stones(self):
         for stone in self.stones:
             stone.type = StoneType.EMPTY
             stone.cluster_id = None
+
+    def update_liberties(self, table):
+        self.liberties = set()
+        for stone in self.stones:
+            xc, yc = stone.table_position
+            self.liberties.update(table.get_stone_liberties(xc, yc))
+
+    def update_liberties_local(self, table, cluster_matrix):
+        self.liberties.clear()
+        for stone in self.stones:
+            xc, yc = stone.table_position
+            for i in range(len(DIRECTIONS_X)):
+                x = xc + DIRECTIONS_X[i]
+                y = yc + DIRECTIONS_Y[i]
+                if table.is_valid_position(x,
+                                           y) and cluster_matrix[x][y] == None:
+                    self.liberties.add((x, y))
 
 
 class Territory:
@@ -427,13 +458,19 @@ class Table:
         return True
 
     # positions with odd coeficients are miss clicks
-    def get_stone_location(self, x, y):
+    def get_stone_raw_location(self, x, y):
         base_x = x - self.start_x + self.stone_size // 2
         base_y = y - self.start_y + self.stone_size // 2
         return base_y // self.stone_size, base_x // self.stone_size
 
+    # get table location
+    def get_stone_location(self, x, y):
+        i, j = self.get_stone_raw_location(x, y)
+        return i // 2, j // 2
+
+    # get stone from window coordinates
     def get_stone(self, x, y) -> StoneSprite:
-        i, j = self.get_stone_location(x, y)
+        i, j = self.get_stone_raw_location(x, y)
         if i % 2 == 1 or i % 2 == 1:
             return None
         i = i // 2
@@ -448,24 +485,13 @@ class Table:
             for stone in v.stones:
                 print(stone.cluster_id)
 
-    def update_cluster_liberties(self):
-        for cluster in self.clusters.values():
-            cluster.liberties = 0
-            for stone in cluster.stones:
-                xc, yc = stone.table_position
-                cluster.liberties += self.get_stone_liberties(xc, yc)
+    def update_cluster_liberties(self, clusters):
+        for cluster in clusters.values():
+            cluster.update_liberties(self)
 
-    def update_local_clusters_liberties(self, selected_stone: StoneSprite):
-        xc, yc = selected_stone.table_position
-        for i in range(len(DIRECTIONS_X)):
-            x = xc + DIRECTIONS_X[i]
-            y = yc + DIRECTIONS_Y[i]
-            if self.is_valid_position(
-                    x, y) and self.stone_matrix[x][y].type != StoneType.EMPTY:
-                neighbor_stone = self.stone_matrix[x][y]
-                print('cls_id', neighbor_stone.cluster_id)
-                neighbor_cluster = self.clusters[neighbor_stone.cluster_id]
-                neighbor_cluster.liberties -= 1
+    def update_cluster_liberties_local(self, clusters, cluster_matrix):
+        for cluster in clusters.values():
+            cluster.update_liberties_local(self, cluster_matrix)
 
     def is_vertex(self, i, j):
         return (i, j) in [(0, 0), (0, self.nr_rows), (self.nr_rows, 0),
@@ -549,13 +575,63 @@ class Table:
                 if matrix_types[i][j] != StoneType.EMPTY:
                     player_by_stone_type[matrix_types[i][j]].score += 1
 
-    # return True if valid movement
-    def update_move(self, game, selected_stone: StoneSprite) -> bool:
+    def is_valid_move(self, game, i, j) -> bool:
+        selected_stone = self.stone_matrix[i][j]
         if selected_stone == self.illegal_stone:
             return False
-        initial_illegal_stone = self.illegal_stone
+
+        selected_stone = copy.deepcopy(selected_stone)
+        aux_clusters = copy.deepcopy(self.clusters)
+        cluster_matrix = [[stone.cluster_id for stone in row]
+                          for row in self.stone_matrix]
+        type_matrix = [[stone.type for stone in row]
+                       for row in self.stone_matrix]
+
+        xc, yc = selected_stone.table_position
+        stone_liberties = self.get_stone_liberties(xc, yc)
+        aux_clusters[StoneCluster.uuid - 1] = StoneCluster(
+            selected_stone, stone_liberties)
+
+        cluster_matrix[xc][yc] = StoneCluster.uuid - 1
+        type_matrix[xc][yc] = game.turn
+
+        # print("[B] TRY_CLUSTERS")
+        #  Debugger.print_clusters(self.clusters)
+
+        for i in range(len(DIRECTIONS_X)):
+            x = xc + DIRECTIONS_X[i]
+            y = yc + DIRECTIONS_Y[i]
+            if self.is_valid_position(x, y) and type_matrix[x][y] == game.turn:
+                if cluster_matrix[xc][yc] == cluster_matrix[x][y]:
+                    continue
+
+                current_cluster = aux_clusters[cluster_matrix[xc][yc]]
+                neighbor_cluster = aux_clusters[cluster_matrix[x][y]]
+
+                aux_clusters.pop(current_cluster.id)
+                neighbor_cluster.merge(current_cluster)
+                for stone in neighbor_cluster.stones:
+                    xs, ys = stone.table_position
+                    cluster_matrix[xs][ys] = stone.cluster_id
+
+        self.update_cluster_liberties_local(aux_clusters, cluster_matrix)
+
+        StoneCluster.uuid -= 1
+
+        has_caputred = self.try_capture(game, xc, yc, type_matrix,
+                                        cluster_matrix, aux_clusters)
+        # print("[A] TRY_CLUSTERS")
+        # Debugger.print_clusters(self.clusters)
+
+        if has_caputred:
+            return True
+
+        return not (len(aux_clusters[cluster_matrix[xc][yc]].liberties) == 0)
+
+    # assert is a valid move calling (is_valid_move) first
+    def update_move(self, game, i, j) -> bool:
         self.illegal_stone = None
-        initial_clusters = self.clusters.copy()
+        selected_stone = self.stone_matrix[i][j]
         selected_stone.type = game.turn
 
         xc, yc = selected_stone.table_position
@@ -563,6 +639,11 @@ class Table:
         self.clusters[StoneCluster.uuid - 1] = StoneCluster(
             selected_stone, stone_liberties)
         selected_stone.cluster_id = StoneCluster.uuid - 1
+
+        # print("[B] IN UPDATE")
+        # Debugger.print_cluster_stone_matrix(self.stone_matrix)
+        # print("CLUSTERS")
+        # Debugger.print_clusters(self.clusters)
 
         for i in range(len(DIRECTIONS_X)):
             x = xc + DIRECTIONS_X[i]
@@ -580,27 +661,25 @@ class Table:
                 self.clusters.pop(current_cluster.id)
                 neighbor_cluster.merge(current_cluster)
 
-        self.update_cluster_liberties()
+        # print("[A] IN UPDATE")
+        # Debugger.print_cluster_stone_matrix(self.stone_matrix)
+        # print("CLUSTERS")
+        # Debugger.print_clusters(self.clusters)
+        self.update_cluster_liberties(self.clusters)
 
-        if not self.try_capture(
-                game, selected_stone) and self.is_suicide(selected_stone):
-            self.clusters.pop(selected_stone.cluster_id)
-            selected_stone.type = StoneType.EMPTY
-            selected_stone.cluster_id = None
-            StoneCluster.uuid -= 1
-            self.clusters = initial_clusters
-            self.illegal_stone = initial_illegal_stone
-            return False
+        # print("[A] UPD CLUSTER")
+        # Debugger.print_cluster_stone_matrix(self.stone_matrix)
 
-        self.update_cluster_liberties()
-        # self.afi_cluster()
-        # for row in self.stone_matrix:
-        #     print([stone.cluster_id for stone in row])
-        return True
+        # print("CLUSTERS")
+        # Debugger.print_clusters(self.clusters)
 
-    # return True if captured opponent stones
-    def try_capture(self, game, selected_stone: StoneSprite) -> bool:
-        xc, yc = selected_stone.table_position
+        self.capture(game, selected_stone)
+
+        self.update_cluster_liberties(self.clusters)
+
+    # return True if could capture opponent stones
+    def try_capture(self, game, xc, yc, type_matrix, cluster_matrix,
+                    clusters) -> bool:
         has_captured = False
         opponent_type = game.get_opponent_player().stone_type
 
@@ -608,35 +687,47 @@ class Table:
             x = xc + DIRECTIONS_X[i]
             y = yc + DIRECTIONS_Y[i]
             if self.is_valid_position(
-                    x, y) and self.stone_matrix[x][y].type == opponent_type:
-                neighbor_stone = self.stone_matrix[x][y]
-                neighbor_cluster = self.clusters[neighbor_stone.cluster_id]
-                if neighbor_cluster.liberties == 0:
-                    if len(neighbor_cluster.stones) == 1:
-                        self.illegal_stone = next(iter(
-                            neighbor_cluster.stones))
-                    self.clusters.pop(neighbor_cluster.id)
-                    neighbor_cluster.capture(game)
+                    x, y) and type_matrix[x][y] == opponent_type:
+                neighbor_cluster = clusters[cluster_matrix[x][y]]
+
+                if len(neighbor_cluster.liberties) == 0:
+                    clusters.pop(neighbor_cluster.id)
+                    neighbor_cluster.clear_captured_stones()
                     has_captured = True
 
         return has_captured
 
-    # return True if is suicide move
-    def is_suicide(self, selected_stone: StoneSprite) -> bool:
-        return self.clusters[selected_stone.cluster_id].liberties == 0
+    def capture(self, game, selected_stone: StoneSprite) -> bool:
+        opponent_type = game.get_opponent_player().stone_type
+
+        xc, yc = selected_stone.table_position
+        for i in range(len(DIRECTIONS_X)):
+            x = xc + DIRECTIONS_X[i]
+            y = yc + DIRECTIONS_Y[i]
+            if self.is_valid_position(
+                    x, y) and self.stone_matrix[x][y].type == opponent_type:
+
+                neighbor_stone = self.stone_matrix[x][y]
+                neighbor_cluster = self.clusters[neighbor_stone.cluster_id]
+                if len(neighbor_cluster.liberties) == 0:
+                    if len(neighbor_cluster.stones) == 1:
+                        self.illegal_stone = next(iter(
+                            neighbor_cluster.stones))
+                    self.clusters.pop(neighbor_cluster.id)
+                    neighbor_cluster.update_capture_score(game)
+                    neighbor_cluster.clear_captured_stones()
 
     def is_valid_position(self, x, y):
         return x >= 0 and x <= self.nr_rows and y >= 0 and y <= self.nr_rows
 
     def get_stone_liberties(self, xc, yc):
-        stone_liberties = 4
+        stone_liberties = set()
         for i in range(len(DIRECTIONS_X)):
             x = xc + DIRECTIONS_X[i]
             y = yc + DIRECTIONS_Y[i]
-            if not self.is_valid_position(x, y):
-                stone_liberties -= 1
-            elif self.stone_matrix[x][y].type != StoneType.EMPTY:
-                stone_liberties -= 1
+            if self.is_valid_position(
+                    x, y) and self.stone_matrix[x][y].type == StoneType.EMPTY:
+                stone_liberties.add((x, y))
         return stone_liberties
 
 
@@ -1021,7 +1112,24 @@ class GameView(arcade.View):
             if selected_stone == None or selected_stone.type != StoneType.EMPTY:
                 return
 
-            if self.table.update_move(self, selected_stone):
+            i, j = self.table.get_stone_location(x, y)
+
+            # print("ULTIMA MUTAREEEEEEEEEEEEEEEEEE")
+
+            # print("[B] CLUSTER_MATRIX")
+            # Debugger.print_cluster_stone_matrix(self.table.stone_matrix)
+
+            # print("[B] CLUSTERS")
+            # Debugger.print_clusters(self.table.clusters)
+
+            if self.table.is_valid_move(self, i, j):
+                # print("[A] CLUSTER_MATRIX")
+                # Debugger.print_cluster_stone_matrix(self.table.stone_matrix)
+
+                # print("[A] CLUSTERS")
+                # Debugger.print_clusters(self.table.clusters)
+
+                self.table.update_move(self, i, j)
                 self.game_started = True
                 self.moves_played += 1
                 if self.moves_played == self.available_moves:
