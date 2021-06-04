@@ -3,7 +3,7 @@
 
 ⚠️ WARNING : This project involves **AI** and probably you'll lose every match. I'm not risponsible for rage quits.
 
-START PLAYING WITH: ```python3 main.py```
+Run game with: ```python3 main.py```
 
 Base lib: [Python Arcade](https://arcade.academy/) 🐍
 
