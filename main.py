@@ -2,13 +2,12 @@ from typing import Set, Text
 import arcade
 import arcade.gui
 import arcade.sprite
-from arcade.gui import ui_style, UIToggle
 from arcade.gui.manager import UIManager
 from enum import Enum
 import os
 import copy
-
-from pyglet.window.key import B, S
+import random
+import time
 
 # DIRECTORY :: CONSTANTS
 WINDOW_TITLE = 'Adam Adrian Claudiu - GO!'
@@ -26,12 +25,73 @@ def get_path(rel_path):
 
 
 class Debugger:
+    ord_move = 0
+    moves = []
+    problem_moves = []
+
+    def add_move(i, j, type):
+        Debugger.ord_move += 1
+        Debugger.moves += [[Debugger.ord_move, (i, j), type.name]]
+
+    def get_moves_str():
+        text = ""
+        for move in Debugger.moves:
+            text += f"Move [{move[0]}] : " + str(move[1:]) + '\n'
+        return text
+
+    def print_moves():
+        for move in Debugger.moves:
+            print(f"Move [{move[0]}] : ", move[1:])
+
+    def write_moves(path):
+        f = open(get_path(path), 'w')
+        f.write(Debugger.get_moves_str())
+        f.close()
+
+    def reset_moves():
+        Debugger.ord_move = 0
+        Debugger.moves.clear()
+
+    def get_matrix_str(matrix):
+        text = ""
+        for i in range(len(matrix) - 1, -1, -1):
+            text += str([el for el in matrix[i]]) + '\n'
+        return text
+
+    def get_move_pairs_str():
+        return f"[{','.join([str(x[1]) for x in Debugger.moves])}]"
+
+    def write_move_pairs(path):
+        f = open(get_path(path), 'w')
+        f.write(Debugger.get_move_pairs_str())
+        f.close()
+
+    def read_move_pairs(path):
+        f = open(get_path(path), 'r')
+        Debugger.problem_moves = eval(f.read())
+
+    def write_matrix(path, matrix):
+        f = open(get_path(path), 'w')
+        f.write(Debugger.get_matrix_str(matrix))
+        f.close()
+
+    def get_clusters_str(clusters):
+        text = ""
+        for cluster in clusters.values():
+            text += f"id= {cluster.id} ;liberties = {cluster.liberties} \n"
+        return text
+
+    def write_clusters(path, clusters):
+        f = open(get_path(path), 'w')
+        f.write(Debugger.get_clusters_str(clusters))
+        f.close()
+
     def print_cluster_stone_matrix(stone_matrix):
         for i in range(len(stone_matrix) - 1, -1, -1):
             print([stone.cluster_id for stone in stone_matrix[i]])
 
-    def print_matrix(matrix, n):
-        for i in range(n, -1, -1):
+    def print_matrix(matrix):
+        for i in range(len(matrix) - 1, -1, -1):
             print([el for el in matrix[i]])
 
     def print_clusters(clusters):
@@ -148,6 +208,8 @@ class MyGhostFlatButton(arcade.gui.UIGhostFlatButton):
             window.show_view(MenuView())
         if text == 'PLAY' or text == 'PLAY AGAIN':
             StoneCluster.uuid = 0
+            Debugger.reset_moves()
+            #Debugger.read_move_pairs('pairs.out')
             window.show_view(GameView(self.selected_options))
 
 
@@ -534,6 +596,15 @@ class Table:
                 matrix[i][j] = matrix[x][y]
                 territory.colors.add(matrix[x][y])
 
+    def is_any_valid_move(self, game):
+        for i in range(self.nr_rows):
+            for j in range(self.nr_rows):
+                if self.stone_matrix[i][
+                        j].type == StoneType.EMPTY and self.is_valid_move(
+                            game, i, j):
+                    return True
+        return False
+
     def print_scoring_matrix(self, matrix):
         for i in range(self.nr_rows, -1, -1):
             print([tp.value for tp in matrix[i]])
@@ -577,6 +648,9 @@ class Table:
 
     def is_valid_move(self, game, i, j) -> bool:
         selected_stone = self.stone_matrix[i][j]
+        if selected_stone.type != StoneType.EMPTY:
+            return False
+
         if selected_stone == self.illegal_stone:
             return False
 
@@ -692,7 +766,11 @@ class Table:
 
                 if len(neighbor_cluster.liberties) == 0:
                     clusters.pop(neighbor_cluster.id)
-                    neighbor_cluster.clear_captured_stones()
+                    for stone in neighbor_cluster.stones:
+                        xs, ys = stone.table_position
+                        type_matrix[xs][ys] = None
+                        cluster_matrix[xs][ys] = None
+
                     has_captured = True
 
         return has_captured
@@ -729,6 +807,33 @@ class Table:
                     x, y) and self.stone_matrix[x][y].type == StoneType.EMPTY:
                 stone_liberties.add((x, y))
         return stone_liberties
+
+
+# DIRECTORY :: BOTS
+
+
+class RandomBot:
+    def move(game):
+        if not game.running:
+            return
+
+        i, j = 0, 0
+        tries = 0
+        if len(Debugger.problem_moves) == 0 or game.moves_played == len(
+                Debugger.problem_moves):
+            nr_rows = game.table.nr_rows
+            while True:
+                i = random.randint(0, nr_rows)
+                j = random.randint(0, nr_rows)
+                if game.table.is_valid_move(game, i, j):
+                    break
+                tries += 1
+                if tries == 20 and not game.table.is_any_valid_move(game):
+                    game.should_end = True
+                    return
+        else:
+            i, j = Debugger.problem_moves[game.moves_played]
+        game.make_move(i, j)
 
 
 # DIRECTORY :: VIEWS
@@ -986,6 +1091,7 @@ class GameView(arcade.View):
         self.available_moves = int(self.selected_options.moves.name[3:])
         self.winner = None
         self.game_started = False  # True when black make first move
+        self.bot_moving = False
 
         self.table = Table(
             start_x=int((self.window.width - 500) / 2),
@@ -1097,14 +1203,20 @@ class GameView(arcade.View):
         self.ui_manager.unregister_handlers()
 
     def on_mouse_motion(self, x, y, dx, dy):
-        if not self.running:
+        if not self.running or self.selected_options.game_type == GameType.AVA:
             return
 
         self.cursor.center_x = x
         self.cursor.center_y = y
 
     def on_mouse_press(self, x: float, y: float, button: int, modifiers: int):
-        if not self.running:
+        if not self.running or self.bot_moving:
+            return
+
+        if self.selected_options.game_type == GameType.AVA:
+            return
+
+        if self.selected_options.game_type == GameType.PVA and self.turn == self.player2.stone_type:
             return
 
         if self.table.is_valid_point(x, y):
@@ -1113,7 +1225,6 @@ class GameView(arcade.View):
                 return
 
             i, j = self.table.get_stone_location(x, y)
-
             # print("ULTIMA MUTAREEEEEEEEEEEEEEEEEE")
 
             # print("[B] CLUSTER_MATRIX")
@@ -1128,14 +1239,21 @@ class GameView(arcade.View):
 
                 # print("[A] CLUSTERS")
                 # Debugger.print_clusters(self.table.clusters)
+                self.make_move(i, j)
 
-                self.table.update_move(self, i, j)
-                self.game_started = True
-                self.moves_played += 1
-                if self.moves_played == self.available_moves:
-                    self.should_end = True
-                else:
-                    self.next_turn()
+    def make_move(self, i, j):
+        if self.running == False:
+            return
+        Debugger.add_move(i, j, self.turn)
+        #Debugger.write_moves('moves.out')
+        #Debugger.write_move_pairs('pairs.out')
+        self.table.update_move(self, i, j)
+        self.game_started = True
+        self.moves_played += 1
+        if self.moves_played == self.available_moves:
+            self.should_end = True
+        else:
+            self.next_turn()
 
     def get_winner(self):
         if self.player1.has_resigned or self.player2.has_resigned:
@@ -1156,7 +1274,6 @@ class GameView(arcade.View):
     def on_update(self, delta_time):
         if self.running and self.game_started:
             self.get_current_player().time.increment(delta_time)
-        self.table.stone_sprites.update()
         stones_hit = arcade.check_for_collision_with_list(
             self.cursor, self.table.stone_sprites)
 
@@ -1169,6 +1286,20 @@ class GameView(arcade.View):
                         stone.alpha = 150
                 else:
                     stone.alpha = 255
+
+        if self.selected_options.game_type == GameType.PVP:
+            return
+
+        if not self.bot_moving:
+            if self.selected_options.game_type == GameType.PVA and self.player2.stone_type == self.turn:
+                self.bot_moving = True
+                RandomBot.move(self)
+                self.bot_moving = False
+
+            if self.selected_options.game_type == GameType.AVA:
+                self.bot_moving = True
+                RandomBot.move(self)
+                self.bot_moving = False
 
     def draw_moves(self):
         arcade.draw_text(
@@ -1185,6 +1316,14 @@ class GameView(arcade.View):
     def on_draw(self):
         arcade.start_render()
 
+        if self.turn == StoneType.BLACK:
+            Textures.black_stone.draw_sized(self.player1.column_x, 300, 50, 50)
+        else:
+            Textures.white_stone.draw_sized(self.player2.column_x, 300, 50, 50)
+
+        self.table.draw()
+        self.table.stone_sprites.draw()
+
         self.draw_moves()
 
         self.player1.draw(
@@ -1194,20 +1333,12 @@ class GameView(arcade.View):
             arcade.color.AQUA,
         )
 
-        if self.turn == StoneType.BLACK:
-            Textures.black_stone.draw_sized(self.player1.column_x, 300, 50, 50)
-        else:
-            Textures.white_stone.draw_sized(self.player2.column_x, 300, 50, 50)
-
         self.player2.draw(
             self.window.height - self.player_name_y,
             self.window.height - self.player_time_y,
             self.window.height - self.player_score_y,
             arcade.color.PINK,
         )
-
-        self.table.draw()
-        self.table.stone_sprites.draw()
 
         self.end_game()
 
