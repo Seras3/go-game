@@ -160,6 +160,16 @@ class StoneType(Enum):
     WHITE = 2
 
 
+class HeuristicType(Enum):
+    H1 = 0
+    H2 = 0
+
+
+class NodeLevel(Enum):
+    MIN = 0
+    MAX = 1
+
+
 # DIRECTORY :: COMPONENTS
 
 
@@ -809,6 +819,55 @@ class Table:
         return stone_liberties
 
 
+class GraphNode:
+    def __init__(self, id, level: NodeLevel, info, h=None, i=None, j=None):
+        self.id = id
+        self.level = level  # MIN or MAX
+        self.info = info  # StoneSprite matrix
+        self.h = h
+        self.i = i
+        self.j = j
+
+    def __str__(self):
+        text = ""
+        for i in range(len(self.info) - 1, -1, -1):
+            for stone in self.info[i]:
+                text += f"({stone.type.name[0]} {stone.cluster_id}) "
+            text += '\n'
+        return text
+
+
+class Heuristic:
+    def has_eye(game, stone, info, stone_type):
+        xc, yc = stone.table_position
+        color = stone_type
+        for i in range(len(DIRECTIONS_X)):
+            x = xc + DIRECTIONS_X[i]
+            y = yc + DIRECTIONS_Y[i]
+            if not game.table.is_valid_position(x, y):
+                return False
+
+            if color != info[x][y].stone_type:
+                return False
+
+        return True
+
+    def calculate_heuristic(game,
+                            info,
+                            stone_type,
+                            heuristic_type=HeuristicType.H1):
+        h = 0
+        if (heuristic_type == HeuristicType.H1):
+            for row in info:
+                for stone in row:
+                    if stone.type == StoneType.EMPTY and Heuristic.has_eye(
+                            game, stone, info, stone_type):
+                        h += 1
+            return h
+
+        return -1
+
+
 # DIRECTORY :: BOTS
 
 
@@ -834,6 +893,83 @@ class RandomBot:
         else:
             i, j = Debugger.problem_moves[game.moves_played]
         game.make_move(i, j)
+
+
+class MinMaxBot:
+    id_cnt = 0
+
+    def __init__(self,
+                 game,
+                 info,
+                 level: NodeLevel,
+                 difficulty=Difficulty.EASY,
+                 heuristic_type=HeuristicType.H1):
+        if difficulty == Difficulty.EASY:
+            self.depth = 3
+        if difficulty == Difficulty.MEDIUM:
+            self.depth = 4
+        if difficulty == Difficulty.HARD:
+            self.depth = 5
+
+        self.game = game
+        info = copy.deepcopy(info)
+        self.graph = GraphNode(MinMaxBot.id_cnt, level, info)
+        MinMaxBot.id_cnt += 1
+        self.heuristic_type = heuristic_type
+        self.dfs(self.graph)
+
+    def dfs(self, node: GraphNode, current_depth=1):
+        if current_depth > self.depth:
+            return
+
+        level = NodeLevel.MAX if node.level == NodeLevel.MIN else NodeLevel.MIN
+        for i in range(self.game.table.nr_rows):
+            for j in range(self.game.table.nr_rows):
+                # TODO another is valid move for local changes
+                if self.game.table.is_valid_move(self.game, i, j):
+                    info = copy.deepcopy(node.info)
+                    print(info[i][j].type)
+                    if current_depth % 2 == 1:
+                        info[i][j].type = self.game.turn
+                    else:
+                        info[i][j].type = self.game.get_opponent_type()
+
+                    h = None
+                    if current_depth == self.depth:
+                        h = Heuristic.calculate_heuristic(
+                            self.game, info, info[i][j].type,
+                            self.heuristic_type)
+
+                    child_node = GraphNode(
+                        MinMaxBot.id_cnt,
+                        info,
+                        level,
+                        h=h,
+                        i=i,
+                        j=j,
+                    )
+                    self.dfs(child_node, current_depth + 1)
+                    MinMaxBot.id_cnt += 1
+
+                    if node.h == None:
+                        node.h = child_node.h
+
+                    if (level == NodeLevel.MAX and node.h < child_node.h) or (
+                            level == NodeLevel.MIN and node.h > child_node.h):
+                        node.info = child_node.info
+                        node.h = child_node.h
+                        node.i = child_node.i
+                        node.j = child_node.j
+
+    def move(self, game):
+        if not game.running:
+            return
+        game.make_move(self.graph.i, self.graph.j)
+
+
+class AlphaBetaBot:
+    def ceva():
+        print()
 
 
 # DIRECTORY :: VIEWS
@@ -1271,6 +1407,9 @@ class GameView(arcade.View):
     def get_opponent_player(self) -> Player:
         return self.player2 if self.turn == self.player1.stone_type else self.player1
 
+    def get_opponent_type(self):
+        return self.get_opponent_player().stone_type
+
     def on_update(self, delta_time):
         if self.running and self.game_started:
             self.get_current_player().time.increment(delta_time)
@@ -1292,8 +1431,17 @@ class GameView(arcade.View):
 
         if not self.bot_moving:
             if self.selected_options.game_type == GameType.PVA and self.player2.stone_type == self.turn:
+
                 self.bot_moving = True
                 RandomBot.move(self)
+                # TODO proper bots implement
+
+                # if self.selected_options.algorithm == Algorithm.MIN_MAX:
+                #     MinMaxBot(self, self.table.stone_matrix, NodeLevel.MAX,
+                #               self.selected_options.difficulty,
+                #               HeuristicType.H1)
+                # else:
+                #     AlphaBetaBot()
                 self.bot_moving = False
 
             if self.selected_options.game_type == GameType.AVA:
